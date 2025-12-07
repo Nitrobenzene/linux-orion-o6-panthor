@@ -241,8 +241,23 @@ int panthor_gpu_l2_power_on(struct panthor_device *ptdev)
 			      hweight64(ptdev->gpu_info.shader_present));
 	}
 
-	/* Set the desired coherency mode before the power up of L2 */
-	panthor_gpu_coherency_set(ptdev);
+	/* CIX SKY1 needs a special PHBA setup before L2 activation */
+		gpu_write(ptdev, GPU_SYSC_PBHA_OVERRIDE(3), 0x22000000);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(0), 0x00230000);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(1), 0x00000023);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(2), 0x00000000);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(3), 0x00000000);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(4), 0x00523222);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(5), 0x00523200);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(6), 0x00000022);
+		gpu_write(ptdev, GPU_SYSC_ALLOC(7), 0x00000032);
+
+		/* This appears to be required to get LS_MEM_* related counters working */
+		gpu_write(ptdev, 0x306C, 0xFFFFFFFF);
+		gpu_write(ptdev, 0x3070, 0xFFFFFFFF);
+		gpu_write(ptdev, 0x307C, 0xFFFFFFFF);
+		gpu_write(ptdev, 0x3074, 0xFFFFFFFF);
+		gpu_write(ptdev, 0x3068, 0x1);
 
 	return panthor_gpu_power_on(ptdev, L2, 1, 20000);
 }
@@ -309,6 +324,10 @@ int panthor_gpu_soft_reset(struct panthor_device *ptdev)
 			 ptdev->gpu->pending_reqs & GPU_IRQ_RESET_COMPLETED)) {
 		ptdev->gpu->pending_reqs |= GPU_IRQ_RESET_COMPLETED;
 		gpu_write(ptdev, GPU_INT_CLEAR, GPU_IRQ_RESET_COMPLETED);
+
+		gpu_write(ptdev, GPU_PWR_KEY, GPU_PWR_KEY_UNLOCK);
+		gpu_write(ptdev, GPU_PWR_OVERRIDE1, 0xFFFFFF);
+
 		gpu_write(ptdev, GPU_CMD, GPU_SOFT_RESET);
 	}
 	spin_unlock_irqrestore(&ptdev->gpu->reqs_lock, flags);

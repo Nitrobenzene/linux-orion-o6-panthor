@@ -14,7 +14,6 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/time64.h>
-#include <linux/acpi.h>
 
 #include <drm/drm_auth.h>
 #include <drm/drm_debugfs.h>
@@ -1628,18 +1627,6 @@ static int panthor_probe(struct platform_device *pdev)
 {
 	struct panthor_device *ptdev;
 
-	if (ACPI_HANDLE(&pdev->dev)) {
-        dev_info(&pdev->dev, "device enumerated by ACPI\n");
-        /* 使用 fwnode / acpi helper 获取资源：
-           - devm_clk_get(dev, ...) 可使用 fwnode 接口自动适配
-           - request_irq 可以用 platform_get_irq()（实现会从 _CRS/Interrupt resource 获得）
-           - 若需要 DSM 方法，使用 acpi_evaluate_object() / acpi_dev_* helper
-        */
-    } else {
-        dev_info(&pdev->dev, "device enumerated by OF/device-tree\n");
-        /* 旧的 of_property_read_* 和 platform_get_resource 路径 */
-    }
-
 	ptdev = devm_drm_dev_alloc(&pdev->dev, &panthor_drm_driver,
 				   struct panthor_device, base);
 	if (IS_ERR(ptdev))
@@ -1697,16 +1684,16 @@ ATTRIBUTE_GROUPS(panthor);
 
 static const struct of_device_id dt_match[] = {
 	{ .compatible = "rockchip,rk3588-mali" },
-	{ .compatible = "arm,mali-valhall-csf" },
+	{ .compatible = "cix,sky1-mali" },
+	{ .compatible = "arm,mali-valhall" },
 	{}
 };
 MODULE_DEVICE_TABLE(of, dt_match);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id panthor_acpi_ids[] = {
-    { "CIXH5000", 0 }, /* 这个 HID/ID 需与固件端 ACPI Device 的 _HID/_CID 对上 */
-    { /* sentinel */ }
-};
+						{ .id = "CIXH5000", .driver_data = 0 },
+						{ /* sentinel */ } };
 MODULE_DEVICE_TABLE(acpi, panthor_acpi_ids);
 #endif
 

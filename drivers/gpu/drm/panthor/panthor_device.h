@@ -12,6 +12,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
+#include <linux/acpi.h>
 
 #include <drm/drm_device.h>
 #include <drm/drm_mm.h>
@@ -99,6 +100,9 @@ struct panthor_device {
 	/** @iomem: CPU mapping of the IOMEM region. */
 	void __iomem *iomem;
 
+	/** @iomem: CPU mapping of the RCSU region on SKY1 SoC. */
+	void __iomem *sky1_rcsu_reg;
+
 	/** @clks: GPU clocks. */
 	struct {
 		/** @core: Core clock. */
@@ -109,7 +113,22 @@ struct panthor_device {
 
 		/** @coregroup: Core group clock. This clock is optional. */
 		struct clk *coregroup;
+
+		/** @backup: Backup clocks. Those clocks are optional. */
+		struct clk *backup[2];
 	} clks;
+
+	/** @pm_domain_devs: PM domain device instances for devices with more than one PM domain. */
+	struct device *pm_domain_devs[2];
+
+	/** @pm_domain_links: PM domain device links for devices with more than one PM domain. */
+	struct device_link *pm_domain_links[2];
+
+	/** @reset_controls: Reset controls instances for devices needing reset at resume time. */
+	struct reset_control *gpu_reset;
+
+	/** @num_reset_controls: Number of reset controls present */
+	u32 num_reset_controls;
 
 	/** @coherent: True if the CPU/GPU are memory coherent. */
 	bool coherent;
@@ -411,6 +430,8 @@ static irqreturn_t panthor_ ## __name ## _irq_threaded_handler(int irq, void *da
 												\
 		if (!status)									\
 			break;									\
+												\
+		gpu_write(ptdev, __reg_prefix ## _INT_CLEAR, status);				\
 												\
 		__handler(ptdev, status);							\
 		ret = IRQ_HANDLED;								\

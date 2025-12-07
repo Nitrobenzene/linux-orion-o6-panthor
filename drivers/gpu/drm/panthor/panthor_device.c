@@ -3,6 +3,7 @@
 /* Copyright 2019 Linaro, Ltd, Rob Herring <robh@kernel.org> */
 /* Copyright 2023 Collabora ltd. */
 
+#include <asm/delay.h>
 #include <linux/clk.h>
 #include <linux/mm.h>
 #include <linux/platform_device.h>
@@ -43,27 +44,150 @@ static int panthor_gpu_coherency_init(struct panthor_device *ptdev)
 
 static int panthor_clk_init(struct panthor_device *ptdev)
 {
-	ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
+	ptdev->clks.core = devm_clk_get(ptdev->base.dev, "gpu_clk_core");
 	if (IS_ERR(ptdev->clks.core))
 		return dev_err_probe(ptdev->base.dev,
 				     PTR_ERR(ptdev->clks.core),
-				     "get 'core' clock failed");
+				     "get 'gpu_clk_core' clock failed");
 
-	ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev, "stacks");
+	ptdev->clks.stacks = devm_clk_get(ptdev->base.dev, "gpu_clk_stacks");
 	if (IS_ERR(ptdev->clks.stacks))
 		return dev_err_probe(ptdev->base.dev,
 				     PTR_ERR(ptdev->clks.stacks),
-				     "get 'stacks' clock failed");
+				     "get 'gpu_clk_stacks' clock failed");
 
-	ptdev->clks.coregroup = devm_clk_get_optional(ptdev->base.dev, "coregroup");
-	if (IS_ERR(ptdev->clks.coregroup))
+	/* CIX SKY1 needs additional backup clocks */
+	ptdev->clks.backup[0] = devm_clk_get_optional(ptdev->base.dev, "gpu_clk_200M");
+	if (IS_ERR(ptdev->clks.backup[0]))
 		return dev_err_probe(ptdev->base.dev,
-				     PTR_ERR(ptdev->clks.coregroup),
-				     "get 'coregroup' clock failed");
+						PTR_ERR(ptdev->clks.backup[0]),
+						"get 'gpu_clk_200M' clock failed");
+
+	ptdev->clks.backup[1] = devm_clk_get_optional(ptdev->base.dev, "gpu_clk_400M");
+	if (IS_ERR(ptdev->clks.backup[1]))
+		return dev_err_probe(ptdev->base.dev,
+						PTR_ERR(ptdev->clks.backup[1]),
+						"get 'gpu_clk_400M' clock failed");
 
 	drm_info(&ptdev->base, "clock rate = %lu\n", clk_get_rate(ptdev->clks.core));
 	return 0;
 }
+
+static void panthor_pm_domain_fini(struct panthor_device *ptdev)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ptdev->pm_domain_devs); i++) {
+		if (!ptdev->pm_domain_devs[i])
+			continue;
+
+		if (ptdev->pm_domain_links[i])
+			device_link_del(ptdev->pm_domain_links[i]);
+
+		dev_pm_domain_detach(ptdev->pm_domain_devs[i], true);
+	}
+}
+
+// static int panthor_pm_domain_init(struct panthor_device *ptdev)
+// {
+// 	int err;
+// 	int i, num_domains;
+
+// 	if (!has_acpi_companion(ptdev->base.dev)) {
+// 		num_domains = of_count_phandle_with_args(ptdev->base.dev->of_node,
+// 							"power-domains",
+// 							"#power-domain-cells");
+
+// 		/*
+// 		* Single domain is handled by the core, and, if only a single power
+// 		* the power domain is requested, the property is optional.
+// 		*/
+// 		if (num_domains < 2)
+// 			return 0;
+
+// 		if (WARN(num_domains > ARRAY_SIZE(ptdev->pm_domain_devs),
+// 				"Too many supplies in compatible structure.\n"))
+// 			return -EINVAL;
+
+// 		for (i = 0; i < num_domains; i++) {
+// 			ptdev->pm_domain_devs[i] =
+// 				dev_pm_domain_attach_by_id(ptdev->base.dev, i);
+// 			if (IS_ERR_OR_NULL(ptdev->pm_domain_devs[i])) {
+// 				err = PTR_ERR(ptdev->pm_domain_devs[i]) ? : -ENODATA;
+// 				ptdev->pm_domain_devs[i] = NULL;
+// 				dev_err(ptdev->base.dev,
+// 					"failed to get pm-domain %d: %d\n",
+// 					i, err);
+// 				goto err;
+// 			}
+
+// 			ptdev->pm_domain_links[i] = device_link_add(ptdev->base.dev,
+// 					ptdev->pm_domain_devs[i], DL_FLAG_PM_RUNTIME |
+// 					DL_FLAG_STATELESS | DL_FLAG_RPM_ACTIVE);
+// 			if (!ptdev->pm_domain_links[i]) {
+// 				dev_err(ptdev->pm_domain_devs[i],
+// 					"adding device link failed!\n");
+// 				err = -ENODEV;
+// 				goto err;
+// 			}
+// 		}
+// 	} else {
+// 		ptdev->pm_domain_devs[1]= fwnode_dev_pm_domain_attach_by_name(ptdev->base.dev, "perf");
+// 		if (IS_ERR_OR_NULL(ptdev->pm_domain_devs[1])) {
+// 			err = PTR_ERR(ptdev->pm_domain_devs[1]) ? : -ENODATA;
+// 			ptdev->pm_domain_devs[1] = NULL;
+// 			dev_err(ptdev->base.dev,
+// 				"failed to get acpi perf domain %d\n", err);
+// 			goto err;
+// 		}
+
+// 		ptdev->pm_domain_links[1] = device_link_add(ptdev->base.dev,
+// 					ptdev->pm_domain_devs[1], DL_FLAG_PM_RUNTIME |
+// 					DL_FLAG_STATELESS | DL_FLAG_RPM_ACTIVE);
+// 		if (!ptdev->pm_domain_links[1]) {
+// 			dev_err(ptdev->base.dev, "Failed to add device_link to gpu perf domain.\n");
+// 			err = -ENODEV;
+// 			goto err;
+// 		}
+
+// 		struct fwnode_handle *fwnode = fwnode_find_reference(ptdev->base.dev->fwnode, "power-supply", 0);
+// 		if (IS_ERR_OR_NULL(fwnode)) {
+// 			dev_warn(ptdev->base.dev, "Failed to get power-supply property, using single power domain.\n");
+// 			return 0;
+// 		}
+// 		ptdev->pm_domain_devs[0] = bus_find_device_by_fwnode(&platform_bus_type, fwnode);
+// 		pm_runtime_enable(ptdev->pm_domain_devs[0]);
+// 		dev_pm_domain_attach(ptdev->pm_domain_devs[0], true);
+// 		fwnode_handle_put(fwnode);
+
+// 		ptdev->pm_domain_links[0] = device_link_add(ptdev->base.dev,
+// 					ptdev->pm_domain_devs[0], DL_FLAG_PM_RUNTIME |
+// 					DL_FLAG_STATELESS | DL_FLAG_RPM_ACTIVE);
+// 		if (!ptdev->pm_domain_links[0]) {
+// 			dev_err(ptdev->base.dev, "Failed to add device_link to gpu power domain.\n");
+// 			err = -ENODEV;
+// 			goto err;
+// 		}
+// 	}
+
+// 	return 0;
+
+// err:
+// 	panthor_pm_domain_fini(ptdev);
+// 	return err;
+// }
+
+static int panthor_resets_init(struct panthor_device *ptdev)
+{
+	ptdev->gpu_reset = devm_reset_control_get(ptdev->base.dev, "gpu_reset");
+	if (IS_ERR(ptdev->gpu_reset)) {
+		dev_err(ptdev->base.dev, "failed to get gpu_reset\n");
+		return PTR_ERR(ptdev->gpu_reset);
+	}
+
+	return 0;
+}
+
 
 void panthor_device_unplug(struct panthor_device *ptdev)
 {
@@ -110,6 +234,8 @@ void panthor_device_unplug(struct panthor_device *ptdev)
 	if (!IS_ENABLED(CONFIG_PM))
 		panthor_device_suspend(ptdev->base.dev);
 
+	panthor_pm_domain_fini(ptdev);
+
 	/* Report the unplug operation as done to unblock concurrent
 	 * panthor_device_unplug() callers.
 	 */
@@ -129,11 +255,14 @@ static void panthor_device_reset_work(struct work_struct *work)
 	struct panthor_device *ptdev = container_of(work, struct panthor_device, reset.work);
 	int ret = 0, cookie;
 
-	/* If the device is entering suspend, we don't reset. A slow reset will
-	 * be forced at resume time instead.
-	 */
-	if (atomic_read(&ptdev->pm.state) != PANTHOR_DEVICE_PM_STATE_ACTIVE)
+	if (atomic_read(&ptdev->pm.state) != PANTHOR_DEVICE_PM_STATE_ACTIVE) {
+		/*
+		 * No need for a reset as the device has been (or will be)
+		 * powered down
+		 */
+		atomic_set(&ptdev->reset.pending, 0);
 		return;
+	}
 
 	if (!drm_dev_enter(&ptdev->base, &cookie))
 		return;
@@ -171,6 +300,8 @@ int panthor_device_init(struct panthor_device *ptdev)
 	struct resource *res;
 	struct page *p;
 	int ret;
+
+	ptdev->coherent = device_get_dma_attr(ptdev->base.dev) == DEV_DMA_COHERENT;
 
 	init_completion(&ptdev->unplug.done);
 	ret = drmm_mutex_init(&ptdev->base, &ptdev->unplug.lock);
@@ -223,26 +354,45 @@ int panthor_device_init(struct panthor_device *ptdev)
 	if (ret)
 		return ret;
 
+	// ret = panthor_pm_domain_init(ptdev);
+	// if (ret)
+	// 	return ret;
+
+	ret = panthor_resets_init(ptdev);
+	if (ret)
+		goto err_release_pm_domains;
+
 	ptdev->iomem = devm_platform_get_and_ioremap_resource(to_platform_device(ptdev->base.dev),
-							      0, &res);
-	if (IS_ERR(ptdev->iomem))
-		return PTR_ERR(ptdev->iomem);
+							      1, &res);
+	if (IS_ERR(ptdev->iomem)) {
+		ret = PTR_ERR(ptdev->iomem);
+		goto err_release_pm_domains;
+	}
+
+	if (of_device_is_compatible(ptdev->base.dev->of_node, "arm,mali-valhall")) {
+		ptdev->sky1_rcsu_reg = devm_platform_ioremap_resource(to_platform_device(ptdev->base.dev), 0);
+		if (IS_ERR(ptdev->sky1_rcsu_reg)) {
+			ret = PTR_ERR(ptdev->sky1_rcsu_reg);
+			goto err_release_pm_domains;
+		}
+	}
+
 
 	ptdev->phys_addr = res->start;
 
 	ret = devm_pm_runtime_enable(ptdev->base.dev);
 	if (ret)
-		return ret;
+		goto err_release_pm_domains;
 
 	ret = pm_runtime_resume_and_get(ptdev->base.dev);
 	if (ret)
-		return ret;
+		goto err_release_pm_domains;
 
 	/* If PM is disabled, we need to call panthor_device_resume() manually. */
 	if (!IS_ENABLED(CONFIG_PM)) {
 		ret = panthor_device_resume(ptdev->base.dev);
 		if (ret)
-			return ret;
+			goto err_release_pm_domains;
 	}
 
 	ret = panthor_hw_init(ptdev);
@@ -295,6 +445,9 @@ err_unplug_gpu:
 
 err_rpm_put:
 	pm_runtime_put_sync_suspend(ptdev->base.dev);
+
+err_release_pm_domains:
+	panthor_pm_domain_fini(ptdev);
 	return ret;
 }
 
@@ -461,7 +614,7 @@ static int panthor_device_resume_hw_components(struct panthor_device *ptdev)
 int panthor_device_resume(struct device *dev)
 {
 	struct panthor_device *ptdev = dev_get_drvdata(dev);
-	int ret, cookie;
+	int ret, cookie, i;
 
 	if (atomic_read(&ptdev->pm.state) != PANTHOR_DEVICE_PM_STATE_SUSPENDED)
 		return -EINVAL;
@@ -480,16 +633,34 @@ int panthor_device_resume(struct device *dev)
 	if (ret)
 		goto err_disable_stacks_clk;
 
-	panthor_devfreq_resume(ptdev);
+	for (i = 0; i < ARRAY_SIZE(ptdev->clks.backup); i++) {
+		ret = clk_prepare_enable(ptdev->clks.backup[i]);
+		if (ret)
+			goto err_disable_backup_clks;
+	}
+
+	/* In case we have reset controls, assert and deassert reset lines */
+	reset_control_assert(ptdev->gpu_reset);
+	udelay(10);
+	reset_control_deassert(ptdev->gpu_reset);
+
+	/* CIX SKY1 have custom devfreq, let's force max for now (XXX: devfreq) */
+	dev_pm_genpd_set_performance_state(ptdev->pm_domain_devs[1], 1000);
+
+	ret = panthor_devfreq_resume(ptdev);
+	if (ret)
+		goto err_disable_coregroup_clk;
 
 	if (panthor_device_is_initialized(ptdev) &&
 	    drm_dev_enter(&ptdev->base, &cookie)) {
-		/* If there was a reset pending at the time we suspended the
-		 * device, we force a slow reset.
-		 */
-		if (atomic_read(&ptdev->reset.pending)) {
-			ptdev->reset.fast = false;
-			atomic_set(&ptdev->reset.pending, 0);
+		panthor_gpu_resume(ptdev);
+		panthor_mmu_resume(ptdev);
+		ret = panthor_fw_resume(ptdev);
+		if (!drm_WARN_ON(&ptdev->base, ret)) {
+			panthor_sched_resume(ptdev);
+		} else {
+			panthor_mmu_suspend(ptdev);
+			panthor_gpu_suspend(ptdev);
 		}
 
 		ret = panthor_device_resume_hw_components(ptdev);
@@ -508,6 +679,9 @@ int panthor_device_resume(struct device *dev)
 			goto err_suspend_devfreq;
 	}
 
+	if (atomic_read(&ptdev->reset.pending))
+		queue_work(ptdev->reset.wq, &ptdev->reset.work);
+
 	/* Clear all IOMEM mappings pointing to this device after we've
 	 * resumed. This way the fake mappings pointing to the dummy pages
 	 * are removed and the real iomem mapping will be restored on next
@@ -522,6 +696,12 @@ int panthor_device_resume(struct device *dev)
 
 err_suspend_devfreq:
 	panthor_devfreq_suspend(ptdev);
+
+err_disable_backup_clks:
+	for (i = 0; i < ARRAY_SIZE(ptdev->clks.backup); i++)
+		clk_disable_unprepare(ptdev->clks.backup[i]);
+
+err_disable_coregroup_clk:
 	clk_disable_unprepare(ptdev->clks.coregroup);
 
 err_disable_stacks_clk:
@@ -539,7 +719,7 @@ err_set_suspended:
 int panthor_device_suspend(struct device *dev)
 {
 	struct panthor_device *ptdev = dev_get_drvdata(dev);
-	int cookie;
+	int ret, cookie, i;
 
 	if (atomic_read(&ptdev->pm.state) != PANTHOR_DEVICE_PM_STATE_ACTIVE)
 		return -EINVAL;
@@ -571,11 +751,40 @@ int panthor_device_suspend(struct device *dev)
 		drm_dev_exit(cookie);
 	}
 
-	panthor_devfreq_suspend(ptdev);
+	ret = panthor_devfreq_suspend(ptdev);
+	if (ret) {
+		if (panthor_device_is_initialized(ptdev) &&
+		    drm_dev_enter(&ptdev->base, &cookie)) {
+			panthor_gpu_resume(ptdev);
+			panthor_mmu_resume(ptdev);
+			drm_WARN_ON(&ptdev->base, panthor_fw_resume(ptdev));
+			panthor_sched_resume(ptdev);
+			drm_dev_exit(cookie);
+		}
+
+		goto err_set_active;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(ptdev->clks.backup); i++) {
+		clk_disable_unprepare(ptdev->clks.backup[i]);
+	}
 
 	clk_disable_unprepare(ptdev->clks.coregroup);
 	clk_disable_unprepare(ptdev->clks.stacks);
 	clk_disable_unprepare(ptdev->clks.core);
 	atomic_set(&ptdev->pm.state, PANTHOR_DEVICE_PM_STATE_SUSPENDED);
 	return 0;
+
+err_set_active:
+	/* If something failed and we have to revert back to an
+	 * active state, we also need to clear the MMIO userspace
+	 * mappings, so any dumb pages that were mapped while we
+	 * were trying to suspend gets invalidated.
+	 */
+	mutex_lock(&ptdev->pm.mmio_lock);
+	atomic_set(&ptdev->pm.state, PANTHOR_DEVICE_PM_STATE_ACTIVE);
+	unmap_mapping_range(ptdev->base.anon_inode->i_mapping,
+			    DRM_PANTHOR_USER_MMIO_OFFSET, 0, 1);
+	mutex_unlock(&ptdev->pm.mmio_lock);
+	return ret;
 }

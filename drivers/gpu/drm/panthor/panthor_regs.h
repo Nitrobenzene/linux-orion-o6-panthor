@@ -118,6 +118,9 @@
 #define   GPU_COHERENCY_ACE				1
 #define   GPU_COHERENCY_NONE				31
 
+#define GPU_SYSC_PBHA_OVERRIDE(n)			(0x320 + ((n) * 4))
+#define GPU_SYSC_ALLOC(n)				(0x340 + ((n) * 4))
+
 #define MCU_CONTROL					0x700
 #define MCU_CONTROL_ENABLE				1
 #define MCU_CONTROL_AUTO				2
@@ -204,5 +207,11 @@
 
 #define CSF_DOORBELL(i)					(0x80000 + ((i) * 0x10000))
 #define CSF_GLB_DOORBELL_ID				0
+
+#define gpu_write(dev, reg, data) \
+	writel(data, (dev)->iomem + (reg))
+
+#define gpu_read(dev, reg) \
+	readl((dev)->iomem + (reg))
 
 #endif
